@@ -4,6 +4,7 @@ import PDFList from './components/PDFList';
 import VoterInfoModal from './components/VoterInfoModal';
 import ProgressIndicator from './components/ProgressIndicator';
 import PDFUpload from './components/PDFUpload';
+import SearchFilters from './components/SearchFilters';
 import { 
   searchOptimized, 
   getPageText, 
@@ -12,6 +13,7 @@ import {
   getIndexingStatus
 } from './services/optimizedIndexService';
 import { isVoterIdSearch, getPrivacySafeContext } from './services/privacyService';
+import { searchWithFilters, getFilteredVoterInfo } from './services/filterSearchService';
 import { parsePDFFilename } from './services/pdfFileService';
 import { discoverPDFFiles } from './utils/pdfDiscovery';
 import { useDebounce } from './hooks/useDebounce';
@@ -31,6 +33,15 @@ function App() {
   const [indexingProgress, setIndexingProgress] = useState({ current: 0, total: 0, isIndexing: false });
   const [indexingStatus, setIndexingStatus] = useState(null);
   const [showUpload, setShowUpload] = useState(false);
+  const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
+  const [filters, setFilters] = useState({
+    name: '',
+    birthDate: '',
+    fatherName: '',
+    motherName: '',
+    areaName: ''
+  });
+  const [searchMode, setSearchMode] = useState('simple'); // 'simple' or 'filter'
 
   // Initialize PDF files list and check indexing status
   useEffect(() => {
@@ -58,14 +69,21 @@ function App() {
 
   // Progressive indexing in background
   useEffect(() => {
-    if (pdfFiles.length === 0 || indexingStatus?.indexedCount >= pdfFiles.length) {
+    if (pdfFiles.length === 0) {
       return;
     }
+
+    const indexedCount = indexingStatus?.indexedCount || 0;
+    if (indexedCount >= pdfFiles.length) {
+      return;
+    }
+
+    let isCancelled = false;
 
     const indexAllPDFs = async () => {
       setIndexingProgress({ current: 0, total: pdfFiles.length, isIndexing: true });
       
-      for (let i = 0; i < pdfFiles.length; i++) {
+      for (let i = 0; i < pdfFiles.length && !isCancelled; i++) {
         const pdf = pdfFiles[i];
         const status = await getIndexingStatus();
         
@@ -75,29 +93,39 @@ function App() {
           continue;
         }
 
+        if (isCancelled) break;
+
         try {
           await indexPDFOptimized(
             pdf.path,
             pdf.filename,
             (currentPage, totalPages) => {
-              // Update progress
-              const progress = i + (currentPage / totalPages);
-              setIndexingProgress(prev => ({ ...prev, current: progress }));
+              if (!isCancelled) {
+                // Update progress
+                const progress = i + (currentPage / totalPages);
+                setIndexingProgress(prev => ({ ...prev, current: progress }));
+              }
             }
           );
         } catch (error) {
-          console.error(`Error indexing ${pdf.filename}:`, error);
+          if (!isCancelled) {
+            console.error(`Error indexing ${pdf.filename}:`, error);
+          }
         }
         
-        setIndexingProgress(prev => ({ ...prev, current: i + 1 }));
+        if (!isCancelled) {
+          setIndexingProgress(prev => ({ ...prev, current: i + 1 }));
+        }
         
         // Yield to browser to prevent blocking
         await new Promise(resolve => setTimeout(resolve, 10));
       }
       
-      setIndexingProgress(prev => ({ ...prev, isIndexing: false }));
-      const finalStatus = await getIndexingStatus();
-      setIndexingStatus(finalStatus);
+      if (!isCancelled) {
+        setIndexingProgress(prev => ({ ...prev, isIndexing: false }));
+        const finalStatus = await getIndexingStatus();
+        setIndexingStatus(finalStatus);
+      }
     };
 
     // Start indexing after a short delay
@@ -105,11 +133,69 @@ function App() {
       indexAllPDFs();
     }, 1000);
 
-    return () => clearTimeout(timer);
-  }, [pdfFiles.length]);
+    return () => {
+      isCancelled = true;
+      clearTimeout(timer);
+    };
+  }, [pdfFiles, indexingStatus?.indexedCount]);
 
   // Optimized search with debouncing
   const performSearch = useCallback(async (query) => {
+    // Safely check if we should use filter search
+    const useFilterSearch = filters && 
+      typeof filters.name === 'string' && 
+      typeof filters.birthDate === 'string' && 
+      filters.name.trim() !== '' && 
+      filters.birthDate.trim() !== '' &&
+      searchMode === 'filter';
+    
+    // Use filter search if filters are active
+    if (useFilterSearch) {
+      setIsSearching(true);
+      try {
+        const filterResults = await searchWithFilters(pdfFiles, filters);
+        
+        if (filterResults.error) {
+          alert(filterResults.error);
+          setSearchResults([]);
+          return;
+        }
+        
+        // Convert filter results to match expected format
+        const formattedResults = filterResults.results.map(result => ({
+          filename: result.filename,
+          filePath: result.filePath,
+          numPages: 0,
+          matches: result.pages.flatMap(page => 
+            page.matchedVoters.map(voter => ({
+              pageNumber: page.pageNumber,
+              previewText: `${voter.voterName} - ${voter.voterId}`,
+              hasMore: false,
+              voter: voter
+            }))
+          ),
+          totalMatches: result.totalMatches
+        }));
+        
+        setSearchResults(formattedResults);
+        
+        if (formattedResults.length > 0) {
+          const firstResult = formattedResults[0];
+          setSelectedPDF(firstResult.filePath);
+          setSelectedPage(firstResult.matches[0]?.pageNumber || 1);
+        } else {
+          setSelectedPDF(null);
+        }
+      } catch (error) {
+        console.error('Filter search error:', error);
+        alert('Filter search failed. Please try again.');
+      } finally {
+        setIsSearching(false);
+      }
+      return;
+    }
+
+    // Simple search
     if (!query.trim()) {
       setSearchResults([]);
       setSelectedPDF(null);
@@ -149,12 +235,24 @@ function App() {
     } finally {
       setIsSearching(false);
     }
-  }, []);
+  }, [pdfFiles, filters, searchMode]);
 
-  // Auto-search when debounced text changes
+  // Auto-search when debounced text changes or filters change
   useEffect(() => {
-    performSearch(debouncedSearchText);
-  }, [debouncedSearchText, performSearch]);
+    // Safely check if we should use filter search
+    const useFilterSearch = filters && 
+      typeof filters.name === 'string' && 
+      typeof filters.birthDate === 'string' && 
+      filters.name.trim() !== '' && 
+      filters.birthDate.trim() !== '' &&
+      searchMode === 'filter';
+    
+    if (useFilterSearch) {
+      performSearch('');
+    } else if (debouncedSearchText) {
+      performSearch(debouncedSearchText);
+    }
+  }, [debouncedSearchText, filters, searchMode, performSearch]);
 
   const handleKeyPress = (e) => {
     if (e.key === 'Enter') {
@@ -171,6 +269,33 @@ function App() {
     if (!selectedPDF) return;
 
     try {
+      // Use filtered search if filters are active
+      const useFilterSearch = filters && 
+        typeof filters.name === 'string' && 
+        typeof filters.birthDate === 'string' && 
+        filters.name.trim() !== '' && 
+        filters.birthDate.trim() !== '' &&
+        searchMode === 'filter';
+      
+      if (useFilterSearch) {
+        const filteredInfo = await getFilteredVoterInfo(selectedPDF, pageNumber, filters);
+        if (filteredInfo) {
+          const pdfMeta = parsePDFFilename(selectedPDF.split('/').pop());
+          setVoterInfo({
+            ...filteredInfo,
+            context: filteredInfo.fullLine,
+            pdfInfo: {
+              filename: selectedPDF.split('/').pop(),
+              pageNumber: pageNumber,
+              centerName: pdfMeta.centerNumber ? `Center ${pdfMeta.centerNumber}` : null
+            }
+          });
+          setShowVoterModal(true);
+        }
+        return;
+      }
+
+      // Regular search
       const pageText = await getPageText(selectedPDF, pageNumber);
       const info = extractVoterInfo(pageText, searchTerm);
       const pdfMeta = parsePDFFilename(selectedPDF.split('/').pop());
@@ -196,6 +321,17 @@ function App() {
       setShowVoterModal(true);
     } catch (error) {
       console.error('Error extracting voter info:', error);
+    }
+  };
+
+  const handleFilterChange = (newFilters) => {
+    setFilters(newFilters);
+    // Switch to filter mode if name and birthdate are filled
+    if (newFilters && newFilters.name && newFilters.birthDate && 
+        newFilters.name.trim() && newFilters.birthDate.trim()) {
+      setSearchMode('filter');
+    } else {
+      setSearchMode('simple');
     }
   };
 
@@ -255,10 +391,27 @@ function App() {
                 <input
                   type="text"
                   className="search-input"
-                  placeholder="Search by voter name, ID, or keyword... (নাম, আইডি, বা কীওয়ার্ড দিয়ে খুঁজুন...)"
+                  placeholder={
+                    filters && 
+                    typeof filters.name === 'string' && 
+                    typeof filters.birthDate === 'string' && 
+                    filters.name.trim() !== '' && 
+                    filters.birthDate.trim() !== '' && 
+                    searchMode === 'filter'
+                      ? "Using advanced filters..." 
+                      : "Search by voter name, ID, or keyword... (নাম, আইডি, বা কীওয়ার্ড দিয়ে খুঁজুন...)"
+                  }
                   value={searchText}
                   onChange={(e) => setSearchText(e.target.value)}
                   onKeyPress={handleKeyPress}
+                  disabled={
+                    filters && 
+                    typeof filters.name === 'string' && 
+                    typeof filters.birthDate === 'string' && 
+                    filters.name.trim() !== '' && 
+                    filters.birthDate.trim() !== '' && 
+                    searchMode === 'filter'
+                  }
                 />
                 {isSearching && (
                   <div className="search-spinner">
@@ -274,12 +427,29 @@ function App() {
                 {showUpload ? '✕' : '📤'} {showUpload ? 'Close' : 'Upload PDFs'}
               </button>
             </div>
+            {filters && 
+             typeof filters.name === 'string' && 
+             typeof filters.birthDate === 'string' && 
+             filters.name.trim() !== '' && 
+             filters.birthDate.trim() !== '' && 
+             searchMode === 'filter' && (
+              <div className="filter-active-indicator">
+                🔍 Filter Search Active: {filters.name} | {filters.birthDate}
+              </div>
+            )}
             {searchResults.length > 0 && (
               <div className="search-stats">
                 Found {searchResults.length} PDF{searchResults.length !== 1 ? 's' : ''} with matches
               </div>
             )}
           </div>
+
+          <SearchFilters
+            onFilterChange={handleFilterChange}
+            filters={filters}
+            isAdvancedMode={showAdvancedFilters}
+            onToggleAdvanced={() => setShowAdvancedFilters(!showAdvancedFilters)}
+          />
 
           {showUpload && (
             <PDFUpload

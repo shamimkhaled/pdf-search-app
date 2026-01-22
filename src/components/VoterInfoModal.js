@@ -29,7 +29,7 @@ const VoterInfoModal = ({ isOpen, onClose, voterInfo, pdfInfo }) => {
               <h3>Voter Details</h3>
               {voterInfo.isPrivacyMode && (
                 <div className="privacy-badge">
-                  🔒 Privacy Mode: Only showing information for the searched voter ID
+                  🔒 Privacy Mode: Only showing information for the searched voter
                 </div>
               )}
               {voterInfo.voterName && (
@@ -37,6 +37,18 @@ const VoterInfoModal = ({ isOpen, onClose, voterInfo, pdfInfo }) => {
               )}
               {voterInfo.voterId && (
                 <p><strong>Voter ID:</strong> {voterInfo.voterId}</p>
+              )}
+              {voterInfo.birthDate && (
+                <p><strong>Birth Date:</strong> {voterInfo.birthDate}</p>
+              )}
+              {voterInfo.fatherName && (
+                <p><strong>Father's Name:</strong> {voterInfo.fatherName}</p>
+              )}
+              {voterInfo.motherName && (
+                <p><strong>Mother's Name:</strong> {voterInfo.motherName}</p>
+              )}
+              {voterInfo.areaName && (
+                <p><strong>Area/Location:</strong> {voterInfo.areaName}</p>
               )}
               {voterInfo.serialNumber && (
                 <p><strong>Serial Number:</strong> {voterInfo.serialNumber}</p>
